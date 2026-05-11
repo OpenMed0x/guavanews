@@ -451,7 +451,7 @@ export default function Home() {
       setIsLoading(true);
       try {
         const result = await apiRequest<Article[]>("/api/articles");
-        const rawData = Array.isArray(result) ? result : result.articles || result.data || [];
+        const rawData = Array.isArray(result) ? result : [];
         const targetCategory = CATEGORY_MAP[activeCategory] || activeCategory;
 
         const filtered = rawData
