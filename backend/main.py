@@ -8,6 +8,9 @@ import hashlib
 import hmac
 import json
 import secrets
+import shutil
+import uuid
+from urllib.parse import urlparse
 
 # 1. 环境路径对齐
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -21,7 +24,9 @@ from agents.publisher import publisher_agent
 from tasks.news_tasks import create_editorial_tasks
 
 # FastAPI 相关导入
-from fastapi import FastAPI, Depends, HTTPException, Body, Header, Request
+from fastapi import FastAPI, Depends, HTTPException, Body, Header, Request, File, UploadFile
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from core.database import get_db, engine, Base
 from models.post import NewsPost
@@ -34,6 +39,10 @@ import requests
 
 # --- 后端初始化 ---
 Base.metadata.create_all(bind=engine)
+
+with engine.begin() as connection:
+    connection.execute(text("ALTER TABLE news_posts ADD COLUMN IF NOT EXISTS image_url VARCHAR(1024)"))
+
 app = FastAPI(title="Guava Editorial API")
 
 app.add_middleware(
@@ -50,6 +59,18 @@ STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_API_BASE = "https://api.stripe.com/v1"
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME", "")
+CLOUDINARY_UPLOAD_PRESET = os.getenv("CLOUDINARY_UPLOAD_PRESET", "")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "")
+BACKEND_PUBLIC_URL = os.getenv("BACKEND_PUBLIC_URL", "http://127.0.0.1:8000").rstrip("/")
+ADMIN_EMAILS = {email.strip().lower() for email in os.getenv("ADMIN_EMAILS", "").split(",") if email.strip()}
+UPLOADS_DIR = os.path.join(current_dir, "uploads")
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 
 class AuthPayload(BaseModel):
@@ -65,6 +86,15 @@ class CheckoutPayload(BaseModel):
 class WalletSubscriptionPayload(BaseModel):
     wallet_address: str
     tx_hash: str | None = None
+
+
+class ArticlePayload(BaseModel):
+    title: str
+    content: str
+    category: str | None = None
+    author: str | None = None
+    language: str | None = None
+    image_url: str | None = None
 
 
 def _hash_password(password: str, salt: str | None = None) -> str:
@@ -146,6 +176,138 @@ def _normalize_wallet_address(wallet_address: str) -> str:
     return normalized
 
 
+def _absolute_asset_url(path: str) -> str:
+    return f"{BACKEND_PUBLIC_URL}{path}"
+
+
+def _validate_image_url(image_url: str | None) -> str | None:
+    if not image_url:
+        return None
+    normalized = image_url.strip()
+    if not normalized:
+        return None
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="image_url must be a valid http/https URL")
+    return normalized
+
+
+def _normalize_article_payload(raw_payload: dict[str, Any]) -> ArticlePayload:
+    title = (raw_payload.get("title") or "").strip()
+    content = (raw_payload.get("content") or raw_payload.get("body") or "").strip()
+    category = (raw_payload.get("category") or "Technology").strip()
+    author = (raw_payload.get("author") or "AGENT_NEON").strip()
+    language = (raw_payload.get("language") or "zh").strip()
+    image_url = _validate_image_url(raw_payload.get("image_url") or raw_payload.get("imageUrl"))
+
+    if not title:
+        if content:
+            title = content.split("\n")[0][:40].strip() or "AI Generated News"
+        else:
+            raise HTTPException(status_code=400, detail="title is required")
+
+    if len(category) > 50:
+        raise HTTPException(status_code=400, detail="category must be 50 characters or fewer")
+    if len(author) > 255:
+        raise HTTPException(status_code=400, detail="author must be 255 characters or fewer")
+    if len(language) > 10:
+        raise HTTPException(status_code=400, detail="language must be 10 characters or fewer")
+
+    return ArticlePayload(
+        title=title,
+        content=content,
+        category=category,
+        author=author,
+        language=language,
+        image_url=image_url,
+    )
+
+
+def _is_managed_local_upload(image_url: str | None) -> bool:
+    return bool(image_url and image_url.startswith(_absolute_asset_url("/uploads/")))
+
+
+def _delete_local_upload_if_managed(image_url: str | None) -> None:
+    if not _is_managed_local_upload(image_url):
+        return
+    filename = image_url.rsplit("/uploads/", 1)[-1]
+    safe_filename = os.path.basename(filename)
+    file_path = os.path.join(UPLOADS_DIR, safe_filename)
+    if os.path.exists(file_path):
+        os.remove(file_path)
+
+
+def _upload_image_to_cloudinary(file: UploadFile) -> str | None:
+    if not CLOUDINARY_CLOUD_NAME or not CLOUDINARY_UPLOAD_PRESET:
+        return None
+
+    file.file.seek(0)
+    response = requests.post(
+        f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/image/upload",
+        data={"upload_preset": CLOUDINARY_UPLOAD_PRESET},
+        files={"file": (file.filename or "upload", file.file, file.content_type or "application/octet-stream")},
+        timeout=60,
+    )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"Cloudinary upload failed: {response.text}")
+    payload = response.json()
+    secure_url = payload.get("secure_url")
+    if not secure_url:
+        raise HTTPException(status_code=500, detail="Cloudinary upload returned no secure_url")
+    return secure_url
+
+
+def _upload_image_to_supabase(file: UploadFile) -> str | None:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY or not SUPABASE_STORAGE_BUCKET:
+        return None
+
+    ext = os.path.splitext(file.filename or "")[1].lower() or ".jpg"
+    filename = f"{uuid.uuid4().hex}{ext}"
+    object_path = f"article-images/{filename}"
+    file.file.seek(0)
+    response = requests.post(
+        f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_STORAGE_BUCKET}/{object_path}",
+        headers={
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "x-upsert": "false",
+            "Content-Type": file.content_type or "application/octet-stream",
+        },
+        data=file.file.read(),
+        timeout=60,
+    )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"Supabase Storage upload failed: {response.text}")
+    return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_STORAGE_BUCKET}/{object_path}"
+
+
+def _store_image_locally(file: UploadFile) -> str:
+    ext = os.path.splitext(file.filename or "")[1].lower() or ".jpg"
+    filename = f"{uuid.uuid4().hex}{ext}"
+    destination = os.path.join(UPLOADS_DIR, filename)
+    file.file.seek(0)
+    with open(destination, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    return _absolute_asset_url(f"/uploads/{filename}")
+
+
+def _validate_upload_file(file: UploadFile) -> None:
+    content_type = (file.content_type or "").lower()
+    if content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported image type. Use JPEG, PNG, WEBP, or GIF.",
+        )
+
+    file.file.seek(0, os.SEEK_END)
+    file_size = file.file.tell()
+    file.file.seek(0)
+    if file_size <= 0:
+        raise HTTPException(status_code=400, detail="Uploaded image is empty")
+    if file_size > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="Image must be 5MB or smaller")
+
+
 def _get_current_user(db: Session, authorization: str | None) -> User:
     token = _get_bearer_token(authorization)
     payload = _decode_auth_token(token)
@@ -153,6 +315,18 @@ def _get_current_user(db: Session, authorization: str | None) -> User:
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+def _is_admin_user(user: User) -> bool:
+    return user.email.lower() in ADMIN_EMAILS
+
+
+def _require_article_owner_or_admin(article: NewsPost, user: User) -> None:
+    article_author = (article.author or "").strip().lower()
+    if _is_admin_user(user):
+        return
+    if article_author != user.email.lower():
+        raise HTTPException(status_code=403, detail="You do not have permission to modify this article")
 
 
 def _verify_stripe_signature(body: bytes, stripe_signature: str) -> None:
@@ -182,7 +356,14 @@ def _verify_stripe_signature(body: bytes, stripe_signature: str) -> None:
 
 @app.get("/api/health")
 async def healthcheck():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "uploads": {
+            "max_bytes": MAX_UPLOAD_BYTES,
+            "cloudinary_enabled": bool(CLOUDINARY_CLOUD_NAME and CLOUDINARY_UPLOAD_PRESET),
+            "supabase_storage_enabled": bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY and SUPABASE_STORAGE_BUCKET),
+        },
+    }
 
 
 @app.post("/api/auth/register")
@@ -322,6 +503,22 @@ async def confirm_wallet_subscription(
         "tx_hash": subscription.tx_hash,
     }
 
+
+@app.post("/api/uploads/image")
+async def upload_article_image(file: UploadFile = File(...)):
+    _validate_upload_file(file)
+
+    image_url = _upload_image_to_supabase(file)
+    if not image_url:
+        image_url = _upload_image_to_cloudinary(file)
+    if not image_url:
+        image_url = _store_image_locally(file)
+
+    return {
+        "image_url": image_url,
+        "storage": "supabase" if "/storage/v1/object/public/" in image_url else "cloudinary" if "cloudinary.com" in image_url else "local",
+    }
+
 # --- 核心：全兼容文章接收接口 ---
 
 @app.post("/api/articles")
@@ -334,28 +531,26 @@ async def handle_article_submission(submission: Any = Body(...), db: Session = D
     try:
         # 兼容性处理：全部转为列表
         items = submission if isinstance(submission, list) else [submission]
+        if not all(isinstance(item, dict) for item in items):
+            raise HTTPException(status_code=400, detail="Each article submission must be an object")
 
         added_posts = []
         for p in items:
-            # 字段提取：兼容 content/body, title/headline 等各种可能
-            content = p.get("content") or p.get("body") or ""
-            title = p.get("title") or (content.split('\n')[0][:40] if content else "AI Generated News")
-            category = p.get("category") or "Technology"
-            author = p.get("author") or "AGENT_NEON"
-            language = p.get("language") or "zh"
+            normalized = _normalize_article_payload(p)
 
             # 去重判断：防止重复入库
-            existing = db.query(NewsPost).filter(NewsPost.title == title).first()
+            existing = db.query(NewsPost).filter(NewsPost.title == normalized.title).first()
             if existing:
-                print(f"⏩ 跳过重复内容: {title[:20]}...")
+                print(f"⏩ 跳过重复内容: {normalized.title[:20]}...")
                 continue
 
             db_post = NewsPost(
-                title=title,
-                content=content,
-                author=author,
-                category=category,
-                language=language,
+                title=normalized.title,
+                content=normalized.content,
+                author=normalized.author,
+                category=normalized.category,
+                language=normalized.language,
+                image_url=normalized.image_url,
             )
             added_posts.append(db_post)
 
@@ -367,10 +562,13 @@ async def handle_article_submission(submission: Any = Body(...), db: Session = D
 
         return {"status": "ignored", "message": "无有效内容或内容已存在"}
 
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         print(f"❌ 写入数据库失败: {e}")
-        return {"status": "error", "detail": str(e)}
+        raise HTTPException(status_code=500, detail="Failed to save article") from e
 
 
 @app.get("/api/articles")
@@ -381,6 +579,63 @@ async def get_articles(db: Session = Depends(get_db)):
     except Exception as e:
         print(f"❌ 获取文章失败: {e}")
         raise HTTPException(status_code=500, detail="Database fetch error")
+
+
+@app.put("/api/articles/{article_id}")
+async def update_article(
+    article_id: int,
+    submission: dict[str, Any] = Body(...),
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    article = db.query(NewsPost).filter(NewsPost.id == article_id).first()
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+    user = _get_current_user(db, authorization)
+    _require_article_owner_or_admin(article, user)
+
+    merged_payload = {
+        "title": submission.get("title", article.title),
+        "content": submission.get("content", submission.get("body", article.content)),
+        "category": submission.get("category", article.category),
+        "author": submission.get("author", article.author),
+        "language": submission.get("language", article.language),
+        "image_url": submission.get("image_url", submission.get("imageUrl", article.image_url)),
+    }
+    normalized = _normalize_article_payload(merged_payload)
+
+    previous_image_url = article.image_url
+    article.title = normalized.title
+    article.content = normalized.content
+    article.category = normalized.category
+    article.author = normalized.author
+    article.language = normalized.language
+    article.image_url = normalized.image_url
+
+    db.commit()
+    db.refresh(article)
+    if previous_image_url != article.image_url:
+        _delete_local_upload_if_managed(previous_image_url)
+    return {"status": "success", "article": article}
+
+
+@app.delete("/api/articles/{article_id}")
+async def delete_article(
+    article_id: int,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    article = db.query(NewsPost).filter(NewsPost.id == article_id).first()
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+    user = _get_current_user(db, authorization)
+    _require_article_owner_or_admin(article, user)
+
+    image_url = article.image_url
+    db.delete(article)
+    db.commit()
+    _delete_local_upload_if_managed(image_url)
+    return {"status": "success", "deleted_id": article_id}
 
 
 @app.delete("/api/articles/clear-test-data")

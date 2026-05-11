@@ -12,5 +12,6 @@ class NewsPost(Base):
     language = Column(String(10))
     title = Column(String(255))
     author = Column(String(255))
+    image_url = Column(String(1024), nullable=True)
     content = Column(Text)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)

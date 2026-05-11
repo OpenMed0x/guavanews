@@ -2,8 +2,10 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Menu, X, Clock, TrendingUp, Lock, Unlock, Zap, Search } from "lucide-react";
+import { ArticleImage } from "@/components/ArticleImage";
 import { CustomConnectButton } from "@/components/CustomConnectButton";
 import { useSubscribe } from "@/hooks/useSubscribe";
+import { apiRequest, getApiBase } from "@/lib/api";
 import { useRouter } from "next/navigation";
 import { useAccount } from "wagmi";
 
@@ -14,6 +16,7 @@ interface Article {
   category: string;
   author?: string;
   created_at?: string;
+  image_url?: string;
 }
 
 interface AuthUser {
@@ -22,8 +25,10 @@ interface AuthUser {
   is_premium: boolean;
 }
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = getApiBase();
 const AUTH_TOKEN_KEY = "guava_auth_token";
+const FALLBACK_ARTICLE_IMAGE =
+  "https://images.unsplash.com/photo-1495020689067-958852a7765e?auto=format&fit=crop&w=1200&q=80";
 
 const GuavaLogo = ({ size = 32 }: { size?: number }) => (
   <svg
@@ -96,7 +101,10 @@ export default function Home() {
   const [isSubscribed, setIsSubscribed] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
-  const [newPost, setNewPost] = useState({ title: "", content: "" });
+  const [newPost, setNewPost] = useState({ title: "", imageUrl: "", content: "" });
+  const [newPostImageFile, setNewPostImageFile] = useState<File | null>(null);
+  const [newPostImagePreview, setNewPostImagePreview] = useState("");
+  const [editingArticleId, setEditingArticleId] = useState<number | null>(null);
   const [authMode, setAuthMode] = useState<"login" | "register">("register");
   const [authForm, setAuthForm] = useState({ email: "", password: "" });
   const [authToken, setAuthToken] = useState("");
@@ -106,11 +114,13 @@ export default function Home() {
   const [stripePending, setStripePending] = useState(false);
   const [billingNotice, setBillingNotice] = useState("");
   const [walletIsSubscribed, setWalletIsSubscribed] = useState(false);
+  const [imageUploadPending, setImageUploadPending] = useState(false);
   const { address, isConnected } = useAccount();
   const { handleSubscribe, txHash, isPending: walletSubscribePending, isSuccess: walletSubscribeSuccess } = useSubscribe();
   const subscriptionRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
   const categories = ["Technology", "Finance", "Literature", "Medicine", "Tennis", "Network Noise"];
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
 
   const getExpiryDate = () => {
     const date = new Date();
@@ -119,13 +129,9 @@ export default function Home() {
   };
 
   const fetchCurrentUser = async (token: string) => {
-    const response = await fetch(`${API_BASE}/api/auth/me`, {
+    const result = await apiRequest<{ user: AuthUser }>("/api/auth/me", {
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (!response.ok) {
-      throw new Error("Session expired");
-    }
-    const result = await response.json();
     const user = result.user as AuthUser;
     setAuthUser(user);
     return user;
@@ -138,11 +144,7 @@ export default function Home() {
     }
 
     try {
-      const response = await fetch(`${API_BASE}/api/wallet-subscriptions/${walletAddress.toLowerCase()}`);
-      if (!response.ok) {
-        throw new Error("Unable to load wallet subscription");
-      }
-      const result = await response.json();
+      const result = await apiRequest<{ is_active: boolean }>(`/api/wallet-subscriptions/${walletAddress.toLowerCase()}`);
       const nextState = Boolean(result.is_active);
       setWalletIsSubscribed(nextState);
       return nextState;
@@ -184,29 +186,60 @@ export default function Home() {
     }
 
     try {
-      const response = await fetch(`${API_BASE}/api/articles`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+      let imageUrl = newPost.imageUrl;
+
+      if (newPostImageFile) {
+        setImageUploadPending(true);
+        const formData = new FormData();
+        formData.append("file", newPostImageFile);
+        const uploadResult = await apiRequest<{ image_url: string }>("/api/uploads/image", {
+          method: "POST",
+          body: formData,
+        });
+        imageUrl = uploadResult.image_url || "";
+      }
+
+      await apiRequest(`/api/articles${editingArticleId ? `/${editingArticleId}` : ""}`, {
+        method: editingArticleId ? "PUT" : "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
         body: JSON.stringify({
           title: newPost.title,
           content: newPost.content,
+          image_url: imageUrl,
           author: authUser?.email || "UserAddressOrID",
           protocol: "activity-pub",
           category: activeCategory,
         }),
       });
-
-      if (response.ok) {
-        alert(`成功发布到 [${activeCategory}] 分类`);
-        setIsModalOpen(false);
-        setNewPost({ title: "", content: "" });
-      } else {
-        alert("后端接口未就绪，但在控制台已打印数据");
-        console.log("发送的数据:", newPost);
-      }
+      alert(editingArticleId ? "文章修改成功" : `成功发布到 [${activeCategory}] 分类`);
+      setIsModalOpen(false);
+      setNewPost({ title: "", imageUrl: "", content: "" });
+      setNewPostImageFile(null);
+      setNewPostImagePreview("");
+      setEditingArticleId(null);
+      window.location.reload();
     } catch (error) {
       console.error("发布失败:", error);
+      alert(error instanceof Error ? error.message : "发布失败");
+    } finally {
+      setImageUploadPending(false);
     }
+  };
+
+  const openEditModal = (article: Article) => {
+    setEditingArticleId(article.id);
+    setNewPost({
+      title: article.title,
+      imageUrl: article.image_url || "",
+      content: article.content,
+    });
+    setActiveCategory(article.category);
+    setNewPostImageFile(null);
+    setNewPostImagePreview(article.image_url || "");
+    setIsModalOpen(true);
   };
 
   const handleAuthSubmit = async () => {
@@ -218,15 +251,11 @@ export default function Home() {
     setAuthPending(true);
     setAuthError("");
     try {
-      const response = await fetch(`${API_BASE}/api/auth/${authMode}`, {
+      const result = await apiRequest<{ token: string; user: AuthUser }>(`/api/auth/${authMode}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(authForm),
       });
-      const result = await response.json();
-      if (!response.ok) {
-        throw new Error(result.detail || "Authentication failed");
-      }
       await storeAuthSession(result.token, result.user);
       setIsAuthModalOpen(false);
       setAuthForm({ email: "", password: "" });
@@ -254,7 +283,7 @@ export default function Home() {
 
     setStripePending(true);
     try {
-      const response = await fetch(`${API_BASE}/api/billing/create-checkout-session`, {
+      const result = await apiRequest<{ checkout_url?: string }>("/api/billing/create-checkout-session", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -265,10 +294,6 @@ export default function Home() {
           cancel_url: `${window.location.origin}?billing=cancel`,
         }),
       });
-      const result = await response.json();
-      if (!response.ok) {
-        throw new Error(result.detail || "Unable to start Stripe checkout");
-      }
       if (result.checkout_url) {
         window.location.href = result.checkout_url;
       }
@@ -293,13 +318,9 @@ export default function Home() {
         try {
           localStorage.setItem(AUTH_TOKEN_KEY, savedToken);
           setAuthToken(savedToken);
-          const response = await fetch(`${API_BASE}/api/auth/me`, {
+          const result = await apiRequest<{ user: AuthUser }>("/api/auth/me", {
             headers: { Authorization: `Bearer ${savedToken}` },
           });
-          if (!response.ok) {
-            throw new Error("Session expired");
-          }
-          const result = await response.json();
           const user = result.user as AuthUser;
           setAuthUser(user);
         } catch {
@@ -332,7 +353,7 @@ export default function Home() {
       }
 
       try {
-        const response = await fetch(`${API_BASE}/api/wallet-subscriptions/confirm`, {
+        await apiRequest("/api/wallet-subscriptions/confirm", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -340,9 +361,6 @@ export default function Home() {
             tx_hash: txHash ?? null,
           }),
         });
-        if (!response.ok) {
-          throw new Error("Unable to confirm wallet subscription");
-        }
         await syncWalletSubscription(address);
         setBillingNotice("Wallet subscription confirmed for the connected address.");
       } catch (error) {
@@ -354,24 +372,130 @@ export default function Home() {
     void confirmWalletSubscription();
   }, [walletSubscribeSuccess, isConnected, address, txHash, syncWalletSubscription]);
 
+  const getArticlePreview = (content: string) => {
+    const normalized = content.replace(/\s+/g, " ").trim();
+    if (normalized.length <= 120) {
+      return normalized;
+    }
+    return `${normalized.slice(0, 120)}...`;
+  };
+
+  const getSearchScore = useCallback((article: Article, query: string) => {
+    if (!query) {
+      return 0;
+    }
+
+    const normalizedTitle = article.title.toLowerCase();
+    const normalizedContent = article.content.toLowerCase();
+    const normalizedAuthor = (article.author || "").toLowerCase();
+    const normalizedCategory = article.category.toLowerCase();
+
+    let score = 0;
+    if (normalizedTitle.includes(query)) {
+      score += 10;
+    }
+    if (normalizedCategory.includes(query)) {
+      score += 6;
+    }
+    if (normalizedAuthor.includes(query)) {
+      score += 4;
+    }
+    if (normalizedContent.includes(query)) {
+      score += 2;
+    }
+    return score;
+  }, []);
+
+  const getHighlightedText = useCallback((text: string, query: string) => {
+    if (!query) {
+      return text;
+    }
+
+    const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`(${escapedQuery})`, "ig");
+    const parts = text.split(pattern);
+
+    return parts.map((part, index) => {
+      if (part.toLowerCase() === query.toLowerCase()) {
+        return (
+          <mark key={`${part}-${index}`} className="bg-[#FFDF8C] px-0.5 text-black">
+            {part}
+          </mark>
+        );
+      }
+      return <React.Fragment key={`${part}-${index}`}>{part}</React.Fragment>;
+    });
+  }, []);
+
+  const getHighlightedPreview = useCallback((content: string, query: string) => {
+    const normalized = content.replace(/\s+/g, " ").trim();
+    if (!query) {
+      return getArticlePreview(content);
+    }
+
+    const matchIndex = normalized.toLowerCase().indexOf(query.toLowerCase());
+    if (matchIndex === -1) {
+      return getArticlePreview(content);
+    }
+
+    const start = Math.max(0, matchIndex - 36);
+    const end = Math.min(normalized.length, matchIndex + query.length + 72);
+    const snippet = normalized.slice(start, end);
+    const prefix = start > 0 ? "..." : "";
+    const suffix = end < normalized.length ? "..." : "";
+    return `${prefix}${snippet}${suffix}`;
+  }, []);
+
   useEffect(() => {
     const fetchArticles = async () => {
       setIsLoading(true);
       try {
-        const response = await fetch(`${API_BASE}/api/articles`);
-        const result = await response.json();
+        const result = await apiRequest<Article[]>("/api/articles");
         const rawData = Array.isArray(result) ? result : result.articles || result.data || [];
         const targetCategory = CATEGORY_MAP[activeCategory] || activeCategory;
 
         const filtered = rawData
-          .filter((a: Article) => a.category === activeCategory || a.category === targetCategory)
+          .filter((a: Article) => {
+            if (normalizedSearchQuery) {
+              return true;
+            }
+            return a.category === activeCategory || a.category === targetCategory;
+          })
+          .filter((a: Article) => {
+            if (!normalizedSearchQuery) {
+              return true;
+            }
+
+            const haystack = [a.title, a.content, a.author, a.category]
+              .filter(Boolean)
+              .join(" ")
+              .toLowerCase();
+
+            return haystack.includes(normalizedSearchQuery);
+          })
           .sort((a: Article, b: Article) => {
+            if (normalizedSearchQuery) {
+              const scoreDifference =
+                getSearchScore(b, normalizedSearchQuery) - getSearchScore(a, normalizedSearchQuery);
+              if (scoreDifference !== 0) {
+                return scoreDifference;
+              }
+            }
             const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
             const dateB = b.created_at ? new Date(b.created_at).getTime() : 0;
             return dateB - dateA;
           });
 
         setArticles(filtered);
+
+        const editArticleId = Number(new URLSearchParams(window.location.search).get("edit"));
+        if (editArticleId) {
+          const targetArticle = filtered.find((article: Article) => article.id === editArticleId);
+          if (targetArticle) {
+            openEditModal(targetArticle);
+            window.history.replaceState({}, "", window.location.pathname);
+          }
+        }
       } catch (error) {
         console.error("获取新闻失败:", error);
         setArticles([]);
@@ -381,9 +505,9 @@ export default function Home() {
     };
 
     if (mounted) {
-      fetchArticles();
+      void fetchArticles();
     }
-  }, [activeCategory, mounted]);
+  }, [activeCategory, mounted, normalizedSearchQuery, getSearchScore]);
 
   useEffect(() => setMounted(true), []);
 
@@ -462,7 +586,13 @@ export default function Home() {
             <span>WIPE TEST DATA</span>
           </button>
           <button
-            onClick={() => setIsModalOpen(true)}
+            onClick={() => {
+              setEditingArticleId(null);
+              setNewPost({ title: "", imageUrl: "", content: "" });
+              setNewPostImageFile(null);
+              setNewPostImagePreview("");
+              setIsModalOpen(true);
+            }}
             className="hidden md:flex items-center gap-1.5 border border-black px-2.5 py-1 hover:bg-black hover:text-white transition-all"
           >
             <Zap size={10} fill="currentColor" />
@@ -524,12 +654,24 @@ export default function Home() {
                 onClick={() => handleArticleClick(article.id)}
                 className="group cursor-pointer border-b border-black/5 pb-10 flex flex-col md:flex-row gap-8 items-start transition-opacity hover:opacity-80 rounded-sm"
               >
+                <div className="w-full md:w-44 shrink-0">
+                  <div className="aspect-[4/3] overflow-hidden rounded-sm border border-black/10 bg-black/5">
+                    <ArticleImage
+                      src={article.image_url || FALLBACK_ARTICLE_IMAGE}
+                      alt={article.title}
+                      className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+                      fallbackSrc={FALLBACK_ARTICLE_IMAGE}
+                    />
+                  </div>
+                </div>
                 <div className="flex-1">
-                  <div className="text-[10px] font-sans font-bold uppercase tracking-widest text-[#990000] mb-3 flex items-center gap-2">
-                    <Zap size={10} fill="currentColor" /> {article.category} / Intelligence
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <div className="text-[10px] font-sans font-bold uppercase tracking-widest text-[#990000] flex items-center gap-2">
+                      <Zap size={10} fill="currentColor" /> {article.category} / Intelligence
+                    </div>
                   </div>
                   <h3 className="text-2xl font-bold leading-tight mb-4 flex items-center gap-2 group-hover:underline decoration-1 decoration-[#990000]">
-                    {article.title}
+                    <span>{getHighlightedText(article.title, normalizedSearchQuery)}</span>
                     {isSubscribed ? (
                       <Unlock size={18} className="text-green-600 shrink-0 transform translate-y-1" />
                     ) : (
@@ -537,7 +679,7 @@ export default function Home() {
                     )}
                   </h3>
                   <p className="text-sm text-gray-600 leading-relaxed line-clamp-3 font-serif opacity-80 italic">
-                    {isSubscribed ? article.content : `${article.content?.substring(0, 100)}...`}
+                    {getHighlightedText(getHighlightedPreview(article.content, normalizedSearchQuery), normalizedSearchQuery)}
                   </p>
                   <div className="mt-6 flex items-center gap-4 text-[10px] font-sans font-bold uppercase opacity-40">
                     <span className="flex items-center gap-1">
@@ -549,12 +691,13 @@ export default function Home() {
                     </span>
                   </div>
                 </div>
-                <div className="w-full md:w-36 h-24 bg-gray-200 grayscale opacity-20 border border-black/5 rounded-sm" />
               </article>
             ))
           ) : (
             <div className="py-20 text-center font-serif italic opacity-40">
-              No intelligence recorded in [{activeCategory}] segment yet.
+              {searchQuery.trim()
+                ? `No matching articles found for "${searchQuery}" across the network.`
+                : `No intelligence recorded in [${activeCategory}] segment yet.`}
             </div>
           )}
         </div>
@@ -701,7 +844,9 @@ export default function Home() {
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setIsModalOpen(false)} />
           <div className="relative bg-[#FFF1E5] border-2 border-black w-full max-w-2xl p-8 shadow-[12px_12px_0px_0px_rgba(0,0,0,1)]">
             <div className="flex justify-between items-center mb-6 border-b-2 border-black pb-4">
-              <h2 className="text-2xl font-black italic uppercase tracking-tight">Broadcast to Network</h2>
+              <h2 className="text-2xl font-black italic uppercase tracking-tight">
+                {editingArticleId ? "Edit Network Story" : "Broadcast to Network"}
+              </h2>
               <X size={24} className="cursor-pointer hover:rotate-90 transition-transform" onClick={() => setIsModalOpen(false)} />
             </div>
             <div className="space-y-6">
@@ -716,6 +861,51 @@ export default function Home() {
                 />
               </div>
               <div>
+                <label className="block text-[10px] font-black uppercase tracking-widest mb-2 text-black">Cover Image</label>
+                <div className="space-y-3">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0] || null;
+                      setNewPostImageFile(file);
+                      if (file) {
+                        setNewPostImagePreview(URL.createObjectURL(file));
+                        setNewPost({ ...newPost, imageUrl: "" });
+                      } else {
+                        setNewPostImagePreview("");
+                      }
+                    }}
+                    className="block w-full text-[11px] font-sans"
+                  />
+                  <div className="text-center text-[10px] font-sans uppercase opacity-40">or</div>
+                  <input
+                    type="url"
+                    value={newPost.imageUrl}
+                    onChange={(e) => {
+                      setNewPost({ ...newPost, imageUrl: e.target.value });
+                      setNewPostImageFile(null);
+                      setNewPostImagePreview(e.target.value);
+                    }}
+                    className="w-full bg-transparent border-b-2 border-black/20 focus:border-black outline-none py-2 font-sans text-sm text-black"
+                    placeholder="https://example.com/article-cover.jpg"
+                  />
+                </div>
+                {(newPostImagePreview || newPost.imageUrl) && (
+                  <div className="mt-4 overflow-hidden rounded-sm border border-black/10 bg-black/5">
+                    <ArticleImage
+                      src={newPostImagePreview || newPost.imageUrl}
+                      alt="Article preview"
+                      className="h-40 w-full object-cover"
+                      fallbackSrc={FALLBACK_ARTICLE_IMAGE}
+                    />
+                  </div>
+                )}
+                <p className="mt-2 text-[10px] font-sans opacity-50">
+                  Upload from your computer, or paste a public image link. New uploads can be stored locally or sent to Cloudinary.
+                </p>
+              </div>
+              <div>
                 <label className="block text-[10px] font-black uppercase tracking-widest mb-2 text-black">Intelligence Content</label>
                 <textarea
                   rows={6}
@@ -727,9 +917,10 @@ export default function Home() {
               </div>
               <button
                 onClick={handlePublish}
+                disabled={imageUploadPending}
                 className="w-full bg-[#990000] text-white py-4 font-sans text-xs font-black uppercase tracking-[0.4em] hover:bg-black transition-all"
               >
-                Publish to Protocol
+                {imageUploadPending ? "Uploading Image..." : editingArticleId ? "Save Changes" : "Publish to Protocol"}
               </button>
             </div>
           </div>
