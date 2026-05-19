@@ -168,6 +168,52 @@ Example `DATABASE_URL` for Supabase:
 DATABASE_URL=postgresql://username:password@db.your-project.supabase.co:5432/postgres
 ```
 
+## Vercel + Supabase Deployment
+
+If you want article content to persist after deployment, `Vercel` alone is not enough. The stable production setup is:
+
+1. Deploy the frontend on `Vercel`
+2. Deploy the FastAPI backend on a backend host such as `Railway`, `Render`, or `Fly.io`
+3. Store articles in `Supabase Postgres`
+
+In other words:
+
+- `Vercel` serves the Next.js frontend
+- `Supabase` stores your article data permanently
+- your deployed backend reads and writes that data through `DATABASE_URL`
+
+Recommended environment variables:
+
+Backend:
+
+```env
+DATABASE_URL=postgresql://username:password@db.your-project.supabase.co:5432/postgres
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+SUPABASE_STORAGE_BUCKET=guava-images
+FRONTEND_URL=https://your-vercel-domain.vercel.app
+BACKEND_PUBLIC_URL=https://your-backend-domain.com
+```
+
+Frontend on Vercel:
+
+```env
+NEXT_PUBLIC_API_BASE_URL=https://your-backend-domain.com
+NEXT_PUBLIC_ADMIN_EMAILS=editor@example.com
+```
+
+Useful verification steps:
+
+```bash
+curl https://your-backend-domain.com/api/health
+```
+
+The health response now reports:
+
+- database provider
+- whether Supabase-style Postgres is enabled
+- whether the backend can connect successfully
+
 Useful backend config files:
 
 - [backend/core/config.py](/Users/linyuanyuan/guavanews/backend/core/config.py)

@@ -4,6 +4,7 @@ import time
 import uvicorn
 import random
 import base64
+import datetime
 import hashlib
 import hmac
 import json
@@ -28,7 +29,7 @@ from fastapi import FastAPI, Depends, HTTPException, Body, Header, Request, File
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from core.database import get_db, engine, Base
+from core.database import get_db, engine, Base, check_database_connection, DATABASE_IS_SUPABASE, DATABASE_PROVIDER
 from models.post import NewsPost
 from models.user import User
 from models.wallet_subscription import WalletSubscription
@@ -166,6 +167,42 @@ def _serialize_user(user: User) -> dict[str, Any]:
         "email": user.email,
         "is_premium": user.is_premium,
         "created_at": user.created_at.isoformat() if user.created_at else None,
+    }
+
+
+def _serialize_hn_style_item(post: NewsPost) -> dict[str, Any]:
+    created_at_ts = int(post.created_at.timestamp()) if post.created_at else int(time.time())
+    excerpt = (post.content or "").replace("\n", " ").strip()
+    if len(excerpt) > 280:
+        excerpt = f"{excerpt[:277]}..."
+
+    return {
+        "id": post.id,
+        "type": "story",
+        "title": post.title,
+        "by": post.author or "unknown",
+        "time": created_at_ts,
+        "unix_time": created_at_ts,
+        "text": post.content,
+        "excerpt": excerpt,
+        "category": post.category,
+        "lang": post.language,
+        "image_url": post.image_url,
+        "url": f"{FRONTEND_URL.rstrip('/')}/article/{post.id}",
+        "score": 1,
+        "descendants": 0,
+        "kids": [],
+    }
+
+
+def _serialize_hn_style_user(author: str, posts: list[NewsPost]) -> dict[str, Any]:
+    sorted_posts = sorted(posts, key=lambda post: post.created_at or datetime.datetime.min, reverse=True)
+    return {
+        "id": author,
+        "created": int((sorted_posts[-1].created_at or datetime.datetime.utcnow()).timestamp()) if sorted_posts else int(time.time()),
+        "submitted": [post.id for post in sorted_posts],
+        "karma": len(sorted_posts),
+        "about": f"Guava editorial author profile for {author}.",
     }
 
 
@@ -358,6 +395,11 @@ def _verify_stripe_signature(body: bytes, stripe_signature: str) -> None:
 async def healthcheck():
     return {
         "status": "ok",
+        "database": {
+            "provider": DATABASE_PROVIDER,
+            "supabase_enabled": DATABASE_IS_SUPABASE,
+            "connected": check_database_connection(),
+        },
         "uploads": {
             "max_bytes": MAX_UPLOAD_BYTES,
             "cloudinary_enabled": bool(CLOUDINARY_CLOUD_NAME and CLOUDINARY_UPLOAD_PRESET),
@@ -579,6 +621,78 @@ async def get_articles(db: Session = Depends(get_db)):
     except Exception as e:
         print(f"❌ 获取文章失败: {e}")
         raise HTTPException(status_code=500, detail="Database fetch error")
+
+
+@app.get("/api/v1/items/{item_id}")
+async def get_item(item_id: int, db: Session = Depends(get_db)):
+    post = db.query(NewsPost).filter(NewsPost.id == item_id).first()
+    if not post:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return _serialize_hn_style_item(post)
+
+
+@app.get("/api/v1/maxitem")
+async def get_max_item(db: Session = Depends(get_db)):
+    latest = db.query(NewsPost).order_by(NewsPost.id.desc()).first()
+    return {"maxitem": latest.id if latest else 0}
+
+
+@app.get("/api/v1/feeds/topstories")
+async def get_topstories(limit: int = 30, db: Session = Depends(get_db)):
+    posts = db.query(NewsPost).order_by(NewsPost.created_at.desc(), NewsPost.id.desc()).limit(max(1, min(limit, 100))).all()
+    return {"items": [_serialize_hn_style_item(post) for post in posts]}
+
+
+@app.get("/api/v1/feeds/newstories")
+async def get_newstories(limit: int = 30, db: Session = Depends(get_db)):
+    posts = db.query(NewsPost).order_by(NewsPost.id.desc()).limit(max(1, min(limit, 100))).all()
+    return {"items": [_serialize_hn_style_item(post) for post in posts]}
+
+
+@app.get("/api/v1/feeds/category/{category}")
+async def get_category_feed(category: str, limit: int = 30, db: Session = Depends(get_db)):
+    posts = (
+        db.query(NewsPost)
+        .filter(NewsPost.category == category)
+        .order_by(NewsPost.created_at.desc(), NewsPost.id.desc())
+        .limit(max(1, min(limit, 100)))
+        .all()
+    )
+    return {"items": [_serialize_hn_style_item(post) for post in posts], "category": category}
+
+
+@app.get("/api/v1/search")
+async def search_items(q: str, limit: int = 20, db: Session = Depends(get_db)):
+    query = q.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query parameter q is required")
+
+    like_query = f"%{query}%"
+    posts = (
+        db.query(NewsPost)
+        .filter(
+            (NewsPost.title.ilike(like_query))
+            | (NewsPost.content.ilike(like_query))
+            | (NewsPost.author.ilike(like_query))
+            | (NewsPost.category.ilike(like_query))
+        )
+        .order_by(NewsPost.created_at.desc(), NewsPost.id.desc())
+        .limit(max(1, min(limit, 100)))
+        .all()
+    )
+    return {
+        "query": query,
+        "count": len(posts),
+        "items": [_serialize_hn_style_item(post) for post in posts],
+    }
+
+
+@app.get("/api/v1/users/{author}")
+async def get_author_profile(author: str, db: Session = Depends(get_db)):
+    posts = db.query(NewsPost).filter(NewsPost.author == author).order_by(NewsPost.created_at.desc()).all()
+    if not posts:
+        raise HTTPException(status_code=404, detail="Author not found")
+    return _serialize_hn_style_user(author, posts)
 
 
 @app.put("/api/articles/{article_id}")

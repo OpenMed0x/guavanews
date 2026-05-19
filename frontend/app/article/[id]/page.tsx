@@ -1,6 +1,7 @@
 "use client";
 import React, { useEffect, useState } from 'react';
 import { ArticleImage } from '@/components/ArticleImage';
+import { FREE_ARTICLE_LIMIT, getRemainingFreeArticles, registerFreeArticleAccess } from '@/lib/article-access';
 import { apiRequest } from '@/lib/api';
 import { useParams, useRouter } from 'next/navigation';
 import { ArrowLeft, Clock, ShieldCheck, Zap, Pencil, Trash2 } from 'lucide-react';
@@ -35,6 +36,8 @@ export default function ArticleDetail() {
   const [article, setArticle] = useState<Article | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [hasArticleAccess, setHasArticleAccess] = useState(false);
+  const [freeArticlesRemaining, setFreeArticlesRemaining] = useState(FREE_ARTICLE_LIMIT);
 
   const canManageArticle = Boolean(
     article &&
@@ -65,18 +68,35 @@ export default function ArticleDetail() {
     const fetchArticle = async () => {
       try {
         const token = localStorage.getItem(AUTH_TOKEN_KEY) || "";
-        if (token) {
-          const meResult = await apiRequest<{ user: AuthUser }>("/api/auth/me", {
-            headers: { Authorization: `Bearer ${token}` },
-          }).catch(() => null);
-          setAuthUser(meResult?.user || null);
-        } else {
-          setAuthUser(null);
-        }
+        const meResult = token
+          ? await apiRequest<{ user: AuthUser }>("/api/auth/me", {
+              headers: { Authorization: `Bearer ${token}` },
+            }).catch(() => null)
+          : null;
+
+        setAuthUser(meResult?.user || null);
 
         const data = await apiRequest<Article[]>("/api/articles");
         const found = data.find(a => a.id === Number(params.id));
         setArticle(found || null);
+
+        if (found) {
+          const normalizedAuthor = (found.author || "").trim().toLowerCase();
+          const normalizedEmail = (meResult?.user?.email || "").trim().toLowerCase();
+          const canManageFoundArticle = Boolean(
+            normalizedEmail &&
+              (normalizedAuthor === normalizedEmail || ADMIN_EMAILS.includes(normalizedEmail)),
+          );
+
+          if (meResult?.user?.is_premium || canManageFoundArticle) {
+            setHasArticleAccess(true);
+            setFreeArticlesRemaining(getRemainingFreeArticles());
+          } else {
+            const accessResult = registerFreeArticleAccess(found.id);
+            setHasArticleAccess(accessResult.allowed);
+            setFreeArticlesRemaining(accessResult.remaining);
+          }
+        }
       } catch (error) {
         console.error("获取文章详情失败:", error);
       } finally {
@@ -88,6 +108,49 @@ export default function ArticleDetail() {
 
   if (isLoading) return <div className="min-h-screen bg-[#FFF1E5] flex items-center justify-center font-serif italic">Syncing with Protocol...</div>;
   if (!article) return <div className="min-h-screen bg-[#FFF1E5] flex items-center justify-center font-serif">Article Not Found.</div>;
+
+  if (!hasArticleAccess) {
+    return (
+      <div className="min-h-screen bg-[#FFF1E5] text-[#333333] font-serif">
+        <nav className="border-b border-black/10 px-6 py-4 bg-[#FFF1E5]/80 backdrop-blur-md sticky top-0 z-50">
+          <div className="flex items-center justify-between gap-4">
+            <button
+              onClick={() => router.push("/")}
+              className="flex items-center gap-2 font-sans font-black text-[10px] uppercase tracking-widest hover:text-[#990000] transition-colors"
+            >
+              <ArrowLeft size={14} /> Back to Network
+            </button>
+          </div>
+        </nav>
+        <main className="mx-auto flex min-h-[calc(100vh-76px)] max-w-2xl flex-col items-center justify-center px-6 text-center">
+          <div className="border-2 border-black bg-white/40 px-8 py-10 shadow-[10px_10px_0px_0px_rgba(0,0,0,1)]">
+            <div className="font-sans text-[10px] font-black uppercase tracking-[0.3em] text-[#990000]">Metered Access Limit Reached</div>
+            <h1 className="mt-4 text-3xl font-black italic text-black">You have used your 5 free articles.</h1>
+            <p className="mt-4 text-base leading-relaxed text-black/70">
+              Subscribe to continue reading full reports, or return to the front page to manage your account.
+            </p>
+            <p className="mt-3 text-[11px] font-sans uppercase tracking-[0.18em] text-black/45">
+              Remaining free reads: {freeArticlesRemaining}
+            </p>
+            <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:justify-center">
+              <button
+                onClick={() => router.push("/")}
+                className="border border-black px-5 py-3 font-sans text-[10px] font-black uppercase tracking-[0.25em] hover:bg-black hover:text-white transition-colors"
+              >
+                Return Home
+              </button>
+              <button
+                onClick={() => router.push("/#subscription")}
+                className="border border-[#990000] bg-[#990000] px-5 py-3 font-sans text-[10px] font-black uppercase tracking-[0.25em] text-white hover:bg-black hover:border-black transition-colors"
+              >
+                Subscribe Now
+              </button>
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#FFF1E5] text-[#333333] font-serif selection:bg-[#FF8F00] selection:text-white pb-20">

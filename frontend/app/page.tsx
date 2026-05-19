@@ -1,10 +1,14 @@
 "use client";
 
+import Link from "next/link";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Menu, X, Clock, TrendingUp, Lock, Unlock, Zap, Search } from "lucide-react";
 import { ArticleImage } from "@/components/ArticleImage";
 import { CustomConnectButton } from "@/components/CustomConnectButton";
+import { GuavaLogo } from "@/components/GuavaLogo";
+import { SiteFooter } from "@/components/SiteFooter";
 import { useSubscribe } from "@/hooks/useSubscribe";
+import { registerFreeArticleAccess, getFreeArticleIds, FREE_ARTICLE_LIMIT } from "@/lib/article-access";
 import { apiRequest, getApiBase } from "@/lib/api";
 import { useRouter } from "next/navigation";
 import { useAccount } from "wagmi";
@@ -29,45 +33,10 @@ const API_BASE = getApiBase();
 const AUTH_TOKEN_KEY = "guava_auth_token";
 const FALLBACK_ARTICLE_IMAGE =
   "https://images.unsplash.com/photo-1495020689067-958852a7765e?auto=format&fit=crop&w=1200&q=80";
-
-const GuavaLogo = ({ size = 32 }: { size?: number }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 100 100"
-    fill="none"
-    xmlns="http://www.w3.org/2000/svg"
-    className="shrink-0 opacity-95"
-  >
-    <path
-      d="M25 55C25 35 38 18 55 18C75 18 88 35 88 55C88 78 72 88 50 88C32 88 25 75 25 55Z"
-      fill="#4ADE80"
-      stroke="#16423C"
-      strokeWidth="2"
-    />
-    <ellipse
-      cx="45"
-      cy="52"
-      rx="22"
-      ry="28"
-      fill="#990000"
-      transform="rotate(-15 45 52)"
-    />
-    <g transform="rotate(-15 45 52)">
-      {[40, 45, 52, 59, 66].map((y, i) => (
-        <circle
-          key={i}
-          cx={i % 2 === 0 ? 45 : i === 1 ? 52 : 38}
-          cy={y}
-          r="1.8"
-          fill="white"
-          fillOpacity="0.9"
-        />
-      ))}
-    </g>
-    <rect x="48" y="5" width="4" height="15" rx="2" fill="#16423C" />
-  </svg>
-);
+const ADMIN_EMAILS = (process.env.NEXT_PUBLIC_ADMIN_EMAILS || "")
+  .split(",")
+  .map((email) => email.trim().toLowerCase())
+  .filter(Boolean);
 
 const TRENDS = [
   { rank: 1, topic: "ActivityPub 2.0 协议标准提案", change: "+124%" },
@@ -75,12 +44,6 @@ const TRENDS = [
   { rank: 3, topic: "去中心化科学 (DeSci) 融资报告", change: "+56%" },
   { rank: 4, topic: "RWA 资产链上化法律框架", change: "+32%" },
 ];
-
-const FOOTER_LINKS = {
-  Support: ["Help Centre", "Subscription Sign Up", "Contact Us", "Accessibility"],
-  Legal: ["Terms & Conditions", "Privacy Policy", "Cookie Policy", "Copyright"],
-  Services: ["Newsletter", "Guava API Access", "Corporate Access", "Job Board"],
-};
 
 const CATEGORY_MAP: { [key: string]: string } = {
   Medicine: "医学研究",
@@ -99,6 +62,7 @@ export default function Home() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [isSubscribed, setIsSubscribed] = useState(false);
+  const [freeArticleIds, setFreeArticleIds] = useState<number[]>([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [newPost, setNewPost] = useState({ title: "", imageUrl: "", content: "" });
@@ -121,12 +85,17 @@ export default function Home() {
   const router = useRouter();
   const categories = ["Technology", "Finance", "Literature", "Medicine", "Tennis", "Network Noise"];
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const freeArticlesRemaining = Math.max(0, FREE_ARTICLE_LIMIT - freeArticleIds.length);
 
   const getExpiryDate = () => {
     const date = new Date();
     date.setDate(date.getDate() + 30);
     return date.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
   };
+
+  const refreshFreeArticleState = useCallback(() => {
+    setFreeArticleIds(getFreeArticleIds());
+  }, []);
 
   const fetchCurrentUser = async (token: string) => {
     const result = await apiRequest<{ user: AuthUser }>("/api/auth/me", {
@@ -165,18 +134,37 @@ export default function Home() {
     await fetchCurrentUser(token);
   };
 
-  const handleArticleClick = (articleId: number) => {
-    if (!isSubscribed) {
-      if (subscriptionRef.current) {
-        subscriptionRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
-        subscriptionRef.current.classList.add("ring-2", "ring-[#FF8E9E]", "ring-offset-4", "duration-500");
-        setTimeout(() => {
-          subscriptionRef.current?.classList.remove("ring-2", "ring-[#FF8E9E]", "ring-offset-4");
-        }, 2000);
-      }
+  const handleArticleClick = (article: Article) => {
+    const normalizedAuthor = (article.author || "").trim().toLowerCase();
+    const normalizedEmail = (authUser?.email || "").trim().toLowerCase();
+    const canManageArticle = Boolean(
+      normalizedEmail && (normalizedAuthor === normalizedEmail || ADMIN_EMAILS.includes(normalizedEmail)),
+    );
+
+    if (isSubscribed || canManageArticle) {
+      router.push(`/article/${article.id}`);
       return;
     }
-    router.push(`/article/${articleId}`);
+
+    const accessResult = registerFreeArticleAccess(article.id);
+    setFreeArticleIds(accessResult.ids);
+
+    if (accessResult.allowed) {
+      if (accessResult.consumed) {
+        setBillingNotice(`Free article unlocked. ${accessResult.remaining} free read${accessResult.remaining === 1 ? "" : "s"} remaining.`);
+      }
+      router.push(`/article/${article.id}`);
+      return;
+    }
+
+    setBillingNotice("You have used your 5 free articles. Subscribe to continue reading full reports.");
+    if (subscriptionRef.current) {
+      subscriptionRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+      subscriptionRef.current.classList.add("ring-2", "ring-[#FF8E9E]", "ring-offset-4", "duration-500");
+      setTimeout(() => {
+        subscriptionRef.current?.classList.remove("ring-2", "ring-[#FF8E9E]", "ring-offset-4");
+      }, 2000);
+    }
   };
 
   const handlePublish = async () => {
@@ -271,6 +259,7 @@ export default function Home() {
     setAuthToken("");
     setAuthUser(null);
     setIsSubscribed(walletIsSubscribed);
+    refreshFreeArticleState();
   };
 
   const handleStripeSubscribe = async () => {
@@ -332,7 +321,8 @@ export default function Home() {
     };
 
     bootstrapAuth();
-  }, []);
+    refreshFreeArticleState();
+  }, [refreshFreeArticleState]);
 
   useEffect(() => {
     setIsSubscribed(Boolean(authUser?.is_premium) || walletIsSubscribed);
@@ -648,10 +638,26 @@ export default function Home() {
           {isLoading ? (
             <div className="py-20 text-center font-sans animate-pulse">Syncing with Protocol...</div>
           ) : articles.length > 0 ? (
-            articles.map((article) => (
+            articles.map((article) => {
+              const normalizedAuthor = (article.author || "").trim().toLowerCase();
+              const normalizedEmail = (authUser?.email || "").trim().toLowerCase();
+              const canManageArticle = Boolean(
+                normalizedEmail && (normalizedAuthor === normalizedEmail || ADMIN_EMAILS.includes(normalizedEmail)),
+              );
+              const articleIsUnlocked = isSubscribed || canManageArticle || freeArticleIds.includes(article.id);
+              const articleCanBeOpened = articleIsUnlocked || freeArticlesRemaining > 0;
+              const accessLabel = isSubscribed
+                ? "Full Access"
+                : articleIsUnlocked
+                  ? "Unlocked"
+                  : articleCanBeOpened
+                    ? `${freeArticlesRemaining} Free Read${freeArticlesRemaining === 1 ? "" : "s"} Left`
+                    : "Premium Required";
+
+              return (
               <article
                 key={article.id}
-                onClick={() => handleArticleClick(article.id)}
+                onClick={() => handleArticleClick(article)}
                 className="group cursor-pointer border-b border-black/5 pb-10 flex flex-col md:flex-row gap-8 items-start transition-opacity hover:opacity-80 rounded-sm"
               >
                 <div className="w-full md:w-44 shrink-0">
@@ -672,8 +678,11 @@ export default function Home() {
                   </div>
                   <h3 className="text-2xl font-bold leading-tight mb-4 flex items-center gap-2 group-hover:underline decoration-1 decoration-[#990000]">
                     <span>{getHighlightedText(article.title, normalizedSearchQuery)}</span>
-                    {isSubscribed ? (
-                      <Unlock size={18} className="text-green-600 shrink-0 transform translate-y-1" />
+                    {articleCanBeOpened ? (
+                      <Unlock
+                        size={18}
+                        className={`${articleIsUnlocked ? "text-green-600" : "text-[#990000]"} shrink-0 transform translate-y-1`}
+                      />
                     ) : (
                       <Lock size={18} className="text-gray-300 shrink-0 transform translate-y-1" />
                     )}
@@ -686,13 +695,14 @@ export default function Home() {
                       <Clock size={12} /> {article.created_at ? new Date(article.created_at).toLocaleDateString() : "RECENT"}
                     </span>
                     <span className="flex items-center gap-1">BY: {article.author || "AGENT_NEON"}</span>
-                    <span className={isSubscribed ? "text-black" : "text-[#990000] italic"}>
-                      {isSubscribed ? "Full Access" : "Premium Required"}
+                    <span className={articleCanBeOpened ? "text-black" : "text-[#990000] italic"}>
+                      {accessLabel}
                     </span>
                   </div>
                 </div>
               </article>
-            ))
+              );
+            })
           ) : (
             <div className="py-20 text-center font-serif italic opacity-40">
               {searchQuery.trim()
@@ -704,6 +714,7 @@ export default function Home() {
 
         <aside className="col-span-12 lg:col-span-4 space-y-10">
           <section
+            id="subscription"
             ref={subscriptionRef}
             className={`p-8 border-t-2 transition-all duration-700 rounded-sm sticky top-[120px] ${isSubscribed ? "bg-white border-green-600 text-black shadow-lg" : "bg-black border-[#990000] text-[#FFF1E5]"}`}
           >
@@ -744,8 +755,11 @@ export default function Home() {
             ) : (
               <div className="space-y-6">
                 <p className="text-[11px] opacity-70 leading-relaxed font-serif">
-                  Use your email account for membership access, then complete Stripe checkout to unlock premium intelligence.
+                  New readers can unlock {FREE_ARTICLE_LIMIT} articles for free. After that, use your email account and Stripe checkout to continue with full premium access.
                 </p>
+                <div className="rounded-sm border border-white/10 bg-white/5 px-4 py-3 text-[10px] font-sans font-bold uppercase tracking-[0.18em] text-white/70">
+                  Free Reads Remaining <span className="ml-2 text-white">{freeArticlesRemaining}</span>
+                </div>
                 <div className="py-4 border-y border-white/10 flex justify-between items-center text-[10px] font-sans font-black uppercase tracking-widest text-white/50">
                   Monthly Pass
                   <span className="text-3xl font-black text-white">$20</span>
@@ -803,41 +817,21 @@ export default function Home() {
         </aside>
       </main>
 
-      <footer className="mt-20 border-t-2 border-black bg-white/40 pt-16 pb-12 mx-6">
-        <div className="max-w-[1300px] mx-auto text-center md:text-left">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-12 mb-16">
-            <div className="lg:col-span-2 space-y-6">
-              <div className="flex items-center gap-3 justify-center md:justify-start">
-                <GuavaLogo size={28} />
-                <div className="text-4xl font-extrabold italic text-[#1a1a1a]">GUAVA</div>
-              </div>
-              <p className="text-xs text-gray-500 font-serif leading-relaxed max-w-sm mx-auto md:mx-0">
-                作为全球领先的去中心化媒体网络，番石榴新闻致力于通过 Web3 协议与链上共识机制，提供真实、透明且不可篡改的资讯服务。
-              </p>
-            </div>
-            {Object.entries(FOOTER_LINKS).map(([title, links]) => (
-              <div key={title} className="space-y-5">
-                <h5 className="font-sans font-black text-[10px] uppercase tracking-[0.2em] text-[#990000]">{title}</h5>
-                <ul className="space-y-3">
-                  {links.map((link) => (
-                    <li key={link} className="text-[11px] font-sans font-bold text-gray-500 hover:text-black cursor-pointer">
-                      {link}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
+      <section className="mx-6 mt-4 border-t border-black/10 pt-6">
+        <div className="max-w-[1300px] mx-auto flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <div className="font-sans text-[10px] font-black uppercase tracking-[0.3em] text-[#990000]">Language & Documentation</div>
+            <p className="mt-2 max-w-2xl text-sm text-black/60">Browse bilingual policy pages and developer-facing API documentation for agents, mobile apps, and enterprise integrations.</p>
           </div>
-          <div className="pt-8 border-t border-black/5 flex flex-col md:flex-row justify-between items-center gap-6 text-[9px] font-sans font-bold text-gray-400 uppercase tracking-widest">
-            <div>© 2026 GUAVA INTELLIGENCE NETWORK.</div>
-            <div className="flex gap-8">
-              <span className="flex items-center gap-1.5 text-green-600">
-                Network <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" /> Synced
-              </span>
-            </div>
+          <div className="flex flex-wrap gap-3 text-[10px] font-sans font-black uppercase tracking-[0.18em]">
+            <Link href="/zh/info/help-centre" className="border border-black/15 px-3 py-2 hover:bg-black hover:text-white transition-colors">中文帮助中心</Link>
+            <Link href="/en/info/help-centre" className="border border-black/15 px-3 py-2 hover:bg-black hover:text-white transition-colors">English Help Centre</Link>
+            <Link href="/en/info/guava-api-access" className="border border-[#990000]/20 px-3 py-2 text-[#990000] hover:bg-[#990000] hover:text-white transition-colors">API Access</Link>
           </div>
         </div>
-      </footer>
+      </section>
+
+      <SiteFooter />
 
       {isModalOpen && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
