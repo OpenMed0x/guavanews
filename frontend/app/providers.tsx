@@ -27,8 +27,10 @@ const config = createConfig({
   chains: [hardhat, base, mainnet],
   transports: {
     [hardhat.id]: http('http://127.0.0.1:8545'),
-    [base.id]: http(), // 以后上线用 Base 链很便宜
-    [mainnet.id]: http(),
+    // 线上真实的 Base 和 Mainnet，使用公开、支持跨域且不收费的公共 RPC 节点
+    // 这样不仅解决了报错，还为以后线上用户真正连接钱包做好了准备！
+    [base.id]: http('https://mainnet.base.org'),
+    [mainnet.id]: http('https://cloudflare-eth.com'),
   },
   ssr: true,
 });
