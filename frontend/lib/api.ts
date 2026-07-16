@@ -11,16 +11,29 @@ export class ApiError extends Error {
   }
 }
 
+//  修改后：
 export function getApiBase() {
-  return DEFAULT_API_BASE;
+  if (typeof window === "undefined") {
+    // 服务端渲染（SSR）时使用默认的环境变量
+    return DEFAULT_API_BASE;
+  }
+  
+  // 客户端运行时：如果是本地开发，依然请求本地 8000 端口；如果是 Vercel 线上，直接返回空字符串走相对路径
+  return window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+    ? DEFAULT_API_BASE
+    : ""; 
 }
 
+//  修改后：
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
+  // 💡 关键：改用 getApiBase() 动态获取地址
+  const apiBase = getApiBase();
+
   try {
-    const response = await fetch(`${DEFAULT_API_BASE}${path}`, {
+    const response = await fetch(`${apiBase}${path}`, {
       ...init,
       signal: controller.signal,
     });
