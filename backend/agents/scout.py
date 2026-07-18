@@ -29,22 +29,64 @@ local_embedder = {
     "config": {"model": "nomic-embed-text", "base_url": "http://localhost:11434"},
 }
 
+tools = []
 
-github_skill = GithubSearchTool(gh_token=Config.GITHUB_TOKEN)
+if Config.GITHUB_TOKEN:
+    github_skill = GithubSearchTool(gh_token=Config.GITHUB_TOKEN)
+    tools.append(github_skill)
+
 web_search_tool = WebsiteSearchTool(embedder=local_embedder)
+tools.append(web_search_tool)
+tools.extend(professional_apps)
+tools.append(ScrapeWebsiteTool())
+
+def get_scout_agent():
+
+    tools = []
+
+    if Config.GITHUB_TOKEN:
+        try:
+            tools.append(
+                GithubSearchTool(
+                    gh_token=Config.GITHUB_TOKEN
+                )
+            )
+        except Exception as e:
+            print(f"Github Tool disabled: {e}")
 
 
-scout_agent = Agent(
-    role="全能领域情报指挥官",
-    goal="指挥 6 套专业 Skill 工具集，按定义格式产出原始结构化事实。",
-    backstory=(
-        "你是一名顶级情报官。"
-        "严禁编造 URL，必须先搜索真实来源，再抓取数据。"
-        "你只返回硬核事实，避免主观废话。"
-    ),
-    tools=[github_skill, *professional_apps, ScrapeWebsiteTool(), web_search_tool],
-    llm=Config.llm,
-    verbose=True,
-    allow_delegation=False,
-    memory=False,
-)
+    try:
+        tools.append(
+            WebsiteSearchTool(
+                embedder=local_embedder
+            )
+        )
+    except Exception as e:
+        print(f"Website Search disabled: {e}")
+
+
+    try:
+        tools.append(
+            ScrapeWebsiteTool()
+        )
+    except Exception as e:
+        print(f"Scrape disabled: {e}")
+
+
+    tools.extend(professional_apps)
+
+
+    return Agent(
+        role="全能领域情报指挥官",
+        goal="指挥 6 套专业 Skill 工具集，按定义格式产出原始结构化事实。",
+        backstory=(
+            "你是一名顶级情报官。"
+            "严禁编造 URL，必须先搜索真实来源，再抓取数据。"
+            "你只返回硬核事实，避免主观废话。"
+        ),
+        tools=tools,
+        llm=Config.llm,
+        verbose=True,
+        allow_delegation=False,
+        memory=False,
+    )

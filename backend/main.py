@@ -19,7 +19,7 @@ if current_dir not in sys.path:
     sys.path.append(current_dir)
 
 from crewai import Crew, Process
-from agents.scout import scout_agent
+from agents.scout import get_scout_agent
 from agents.writer import neon_agent, cipher_agent
 from agents.publisher import publisher_agent
 from tasks.news_tasks import create_editorial_tasks
@@ -775,7 +775,8 @@ def start_guava_editorial():
     print("GUAVA 全能数字编辑部启动 (M2 硬件保护模式)")
     print("目标领域: [金融, 科技, 医学, 网球, 艺术]")
     print("🚀" * 10 + "\n")
-
+    
+    scout_agent = get_scout_agent()
     writer_choice = random.choice([neon_agent, cipher_agent])
     language_label = "中文 (Neon)" if writer_choice == neon_agent else "English (Cipher)"
     print(f"🎲 今日轮值记者: {language_label}")
