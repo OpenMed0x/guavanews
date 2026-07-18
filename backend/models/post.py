@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime
 from core.database import Base
-import datetime
+from datetime import datetime, UTC
 
 
 class NewsPost(Base):
@@ -14,4 +14,4 @@ class NewsPost(Base):
     author = Column(String(255))
     image_url = Column(String(1024), nullable=True)
     content = Column(Text)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
