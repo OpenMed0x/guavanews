@@ -29,16 +29,6 @@ local_embedder = {
     "config": {"model": "nomic-embed-text", "base_url": "http://localhost:11434"},
 }
 
-tools = []
-
-if Config.GITHUB_TOKEN:
-    github_skill = GithubSearchTool(gh_token=Config.GITHUB_TOKEN)
-    tools.append(github_skill)
-
-web_search_tool = WebsiteSearchTool(embedder=local_embedder)
-tools.append(web_search_tool)
-tools.extend(professional_apps)
-tools.append(ScrapeWebsiteTool())
 
 def get_scout_agent():
 

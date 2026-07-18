@@ -1,7 +1,5 @@
 fastapi==0.115.0
-uvicorn==0.30.0
-
-crewai==0.186.0
+uvicorn==0.51.0
 
 langchain==0.3.27
 langchain-community==0.3.27
@@ -9,7 +7,7 @@ langchain-openai==0.3.29
 
 openai==1.99.9
 
-tiktoken==0.11.0
+tiktoken==0.8.0
 
 python-dotenv==1.1.1
 
@@ -20,5 +18,12 @@ requests==2.32.5
 python-multipart==0.0.20
 
 sqlalchemy==2.0.43
+psycopg2-binary==2.9.11
 
-crewai-tools
+crewai==1.14.1
+crewai-tools==1.14.1
+chromadb==1.1.1
+
+composio-crewai==0.11.3
+composio==0.11.3
+composio-client==1.28.0
