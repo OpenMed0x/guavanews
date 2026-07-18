@@ -13,15 +13,7 @@ export class ApiError extends Error {
 
 //  修改后：
 export function getApiBase() {
-  if (typeof window === "undefined") {
-    // 服务端渲染（SSR）时使用默认的环境变量
     return DEFAULT_API_BASE;
-  }
-  
-  // 客户端运行时：如果是本地开发，依然请求本地 8000 端口；如果是 Vercel 线上，直接返回空字符串走相对路径
-  return window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
-    ? DEFAULT_API_BASE
-    : ""; 
 }
 
 //  修改后：
