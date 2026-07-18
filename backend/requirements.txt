@@ -1,3 +1,6 @@
+--only-binary=:all:
+tiktoken
+pydantic
 crewai
 langchain-community
 python-dotenv
